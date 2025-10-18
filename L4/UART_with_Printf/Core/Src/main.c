@@ -63,7 +63,7 @@ int __io_putchar(int character){
 	if (character == '\n'){
 
 		uint8_t newLineBeginChar = '\r';
-		HAL_UART_Transmit(&huart2, &character, 1, HAL_MAX_DELAY);
+		HAL_UART_Transmit(&huart2, &newLineBeginChar, 1, HAL_MAX_DELAY);
 
 	}
 
