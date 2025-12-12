@@ -20,6 +20,7 @@
 #include "main.h"
 #include "i2c.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -45,6 +46,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define MEASUREMENT_DELAY 800
+
+#define CAPTURED_VALUES_FROM_IR   64
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -78,6 +81,112 @@ int __io_putchar(int character)
 
 	return 1;
 }
+
+typedef enum {
+	PULSE_9MS,
+	PULSE_4MS,
+	PULSE_2MS,
+	PULSE_LONG,
+	PULSE_SHORT,
+	PULSE_ERROR,
+}timeOfPulse;
+
+static timeOfPulse definePulseBaseOnTime(uint32_t time)
+{
+	if(time < 250){
+		return PULSE_ERROR;
+	}
+	else if (time < 1200){
+		return PULSE_SHORT;
+	}
+	else if (time < 2000) {
+		return PULSE_LONG;
+	}
+	else if (time < 3000) {
+		return PULSE_2MS;
+	}
+	else if (time < 6000) {
+		return PULSE_4MS;
+	}
+	else if (time < 12000) {
+		return PULSE_9MS;
+	}
+	else{
+		return PULSE_ERROR;
+	}
+}
+
+static volatile uint32_t receivedValues;
+static int receivedBits;
+
+static void pulseHandler(timeOfPulse pulse)
+{
+	if(receivedBits >= 32){
+		return;
+	}
+
+	switch(pulse){
+	case PULSE_SHORT:
+		receivedValues = receivedValues >> 1;
+		receivedBits++;
+		break;
+	case PULSE_LONG:
+		receivedValues = (receivedValues >> 1) | 0x80000000;
+		receivedBits++;
+		break;
+	case PULSE_4MS:
+	    receivedValues = 0;
+	    receivedBits = 0;
+	    break;
+	case PULSE_2MS:
+	    if (receivedBits == 0){
+	      receivedBits = 32;
+	    }
+	    break;
+	default:
+		receivedBits = 0;
+		break;
+	}
+}
+
+volatile uint32_t values[CAPTURED_VALUES_FROM_IR];
+
+int ir_counter;
+
+int irPilotCaptureKey(void)
+{
+	if(receivedBits != 32){
+		return -1;
+	}
+
+	uint8_t values = receivedValues >> 16;
+
+	receivedBits = 0;
+
+	return values;
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  uint32_t new_val;
+
+  if (htim == &htim2) {
+
+	  switch (HAL_TIM_GetActiveChannel(&htim2)) {
+
+	  	  case HAL_TIM_ACTIVE_CHANNEL_1:
+
+	  		  new_val = definePulseBaseOnTime(HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1));
+
+	  		  pulseHandler(new_val);
+	  		  break;
+	  	  default:
+	  		  break;
+	  }
+  }
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -112,7 +221,11 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI2_Init();
   MX_USART2_UART_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+
+  HAL_TIM_Base_Start(&htim2);
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
 
   /* USER CODE END 2 */
 
@@ -137,29 +250,141 @@ int main(void)
   screenCopy();
 
   HAL_Delay(5000);
+
+  typedef enum{
+	    SCREEN_NONE = 0,
+	    SCREEN_CHANNEL_1,
+	    SCREEN_CHANNEL_2,
+	    SCREEN_TEMPERATURE,
+	    SCREEN_PRESSURE,
+  } ScreenState;
+
+  ScreenState currentScreen = SCREEN_NONE;
+
   while (1)
   {
-	  float temp = lpsSensorGetTemp();
-	  float press = lpsSensorGetPress();
+	  int key = irPilotCaptureKey();
 
-	  printf("Temp = %.1f (Celsius)\n", temp);
-	  printf("Press = %.1f (hPascals)\n", press);
+	      if (key != -1)
+	      {
+	          printf("Key: %02x\n", key);
 
-	  hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+	          switch (key)
+	          {
+	              case 0x0C:
+	                  currentScreen = SCREEN_CHANNEL_1;
+	                  break;
 
-	  char buf_char[32];
-	  wchar_t buf_wchar[32];
+	              case 0x08:
+	                  currentScreen = SCREEN_CHANNEL_2;
+	                  break;
 
+	              case 0x18:
+	                  currentScreen = SCREEN_TEMPERATURE;
+	                  break;
 
-	  sprintf(buf_char, "T = %.1f C", temp);
+	              case 0x5E:
+	                  currentScreen = SCREEN_PRESSURE;
+	                  break;
 
-	  mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+	              case 0x5A:
+	                  currentScreen = SCREEN_NONE;
+	                  hagl_clear_screen();
+	                  screenCopy();
+	                  break;
 
-	  hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+	              case 0x1C:
+	                  hagl_clear_screen();
+	                  screenCopy();
+	                  break;
 
-	  screenCopy();
+	              default:
+	                  break;
+	          }
+	      }
 
-	  HAL_Delay(5000);
+	      if (currentScreen != SCREEN_NONE)
+	         {
+	             hagl_clear_screen();
+
+            	 char buf_char[32];
+            	 wchar_t buf_wchar[32];
+
+	             switch (currentScreen)
+	             {
+	                 case SCREEN_CHANNEL_1:
+	                	 hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+	                	 sprintf(buf_char, "Kanał 1");
+	                	 mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+	                	 hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+	                     break;
+
+	                 case SCREEN_CHANNEL_2:
+	                	 hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+	                	 sprintf(buf_char, "Kanał 2");
+	                	 mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+	                	 hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+	                     break;
+
+	                 case SCREEN_TEMPERATURE:
+	                 {
+	                     float temp = lpsSensorGetTemp();
+	                     hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+	                     sprintf(buf_char, "P = %.1f C", temp);
+	                     mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+	                     hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+	                     printf("Temp = %.1f (Celsius)\n", temp);
+
+	                     break;
+	                 }
+
+	                 case SCREEN_PRESSURE:
+	                 {
+	                     float press = lpsSensorGetPress();
+	                     hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+	                     sprintf(buf_char, "P = %.1f hPa", press);
+	                     mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+	                     hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+	                     printf("Press = %.1f (hPascals)\n", press);
+
+	                     break;
+	                 }
+
+	                 default:
+	                     break;
+	             }
+
+	             screenCopy();
+	         }
+
+	  HAL_Delay(100);
+//	  float temp = lpsSensorGetTemp();
+//	  float press = lpsSensorGetPress();
+//
+//	  printf("Temp = %.1f (Celsius)\n", temp);
+//	  printf("Press = %.1f (hPascals)\n", press);
+//
+//	  hagl_fill_rectangle(10, 50, 150, 80, BLACK);
+//
+//	  char buf_char[32];
+//	  wchar_t buf_wchar[32];
+//
+//
+//	  sprintf(buf_char, "T = %.1f C", temp);
+//
+//	  mbstowcs(buf_wchar, buf_char, strlen(buf_char)+1);
+//
+//	  hagl_put_text(buf_wchar, 20, 55, WHITE, font6x9);
+//
+//	  screenCopy();
+//
+//	  HAL_Delay(5000);
+//
+//	  int capturedKey = irPilotCaptureKey();
+//
+//	  if(capturedKey != -1){
+//		  printf("Code: %02x\n", capturedKey);
+//	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
